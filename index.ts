@@ -7,23 +7,32 @@ const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "your-secret-here";
 const PORT = process.env.PORT || 3000;
 const LOG_FULL_PAYLOAD = process.env.LOG_FULL_PAYLOAD === "true";
 const PAYLOAD_PREVIEW_LENGTH = 800;
-const FEATURE_BRANCH_NAME = "feature/workspace-data-backend";
-const TASK_BRANCH_PREFIX = "feature/workspace-data-backend-T";
+const MAIN_BRANCHES = new Set(["main", "master"]);
+const TASK_BRANCH_SUFFIX_REGEX = /(?:^|[^A-Za-z0-9])T\d+$/;
+const TASK_YAML_REGEX = /(?:^|\/)T\d+\.yaml$/;
+const REQUIRED_FILES = [
+  "status.yaml",
+  "product-spec.md",
+  "technical-design.md",
+  "tasks.md",
+];
 
-function getBranchRole(branchName?: string): "feature" | "task" | "other" {
+function getBranchRole(
+  branchName?: string,
+): "main" | "feature" | "task" | "other" {
   if (!branchName) {
     return "other";
   }
 
-  if (branchName === FEATURE_BRANCH_NAME) {
-    return "feature";
+  if (MAIN_BRANCHES.has(branchName)) {
+    return "main";
   }
 
-  if (branchName.startsWith(TASK_BRANCH_PREFIX)) {
+  if (TASK_BRANCH_SUFFIX_REGEX.test(branchName)) {
     return "task";
   }
 
-  return "other";
+  return "feature";
 }
 
 function getBranchNameFromRef(ref?: string): string | undefined {
@@ -31,7 +40,38 @@ function getBranchNameFromRef(ref?: string): string | undefined {
     return undefined;
   }
 
-  return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+  if (!ref.startsWith("refs/heads/")) {
+    return undefined;
+  }
+
+  return ref.slice("refs/heads/".length);
+}
+
+function collectChangedFiles(commit?: Record<string, unknown>): string[] {
+  if (!commit) {
+    return [];
+  }
+
+  const files = new Set<string>();
+  const groups = ["added", "modified", "removed"];
+
+  for (const group of groups) {
+    const entries = commit[group as keyof typeof commit];
+    if (Array.isArray(entries)) {
+      for (const entry of entries) {
+        if (typeof entry === "string") {
+          files.add(entry);
+        }
+      }
+    }
+  }
+
+  return Array.from(files).sort();
+}
+
+function matchByBasename(files: string[], target: string): string[] {
+  const suffix = `/${target}`;
+  return files.filter((file) => file === target || file.endsWith(suffix));
 }
 
 /**
@@ -130,97 +170,109 @@ app.post("/webhook/github", async (c) => {
 
     console.log(`[webhook] parsed repo=${repoName} action=${action}`);
 
-    const branchName =
-      event === "push"
-        ? getBranchNameFromRef(data.ref)
-        : event === "create"
-          ? typeof data.ref === "string"
-            ? data.ref
-            : undefined
-          : undefined;
+    if (event !== "push") {
+      console.log(
+        `[webhook] ignored event=${event} delivery=${delivery ?? "unknown"}`,
+      );
+      return c.json(
+        {
+          success: false,
+          message: `Event type "${event}" ignored. Only "push" events are processed.`,
+        },
+        202,
+      );
+    }
+
+    const branchName = getBranchNameFromRef(data.ref);
 
     const branchRole = getBranchRole(branchName);
 
     if (branchRole === "other") {
       console.log(
-        `[webhook] ignored branch=${branchName ?? "unknown"} event=${event} delivery=${delivery ?? "unknown"}`,
+        `[webhook] ignored ref=${data.ref ?? "unknown"} event=${event} delivery=${delivery ?? "unknown"}`,
       );
       return c.json(
         {
           success: false,
-          message: `Branch "${branchName ?? "unknown"}" ignored. Only feature/task branches are processed.`,
+          message:
+            "Ref ignored. Only branch refs (refs/heads/*) for main/feature/task are processed.",
         },
         202,
       );
     }
 
-    if (event !== "create" && event !== "push") {
-      console.log(
-        `[webhook] ignored event=${event} branch=${branchName ?? "unknown"} delivery=${delivery ?? "unknown"}`,
-      );
-      return c.json(
-        {
-          success: false,
-          message: `Event type "${event}" ignored. Only "create" and "push" events are processed.`,
-        },
-        202,
-      );
-    }
-
-    const featureBranch =
-      branchRole === "feature" ? branchName : FEATURE_BRANCH_NAME;
-    const taskBranch = branchRole === "task" ? branchName : branchName;
-    const featureBranchRole = getBranchRole(featureBranch);
-    const taskBranchRole = getBranchRole(taskBranch);
-    const branchState = event === "create" ? "created" : "updated";
-    const branchUpdateCount =
-      event === "push" && typeof data.commits?.length === "number"
-        ? data.commits.length
+    const latestCommit =
+      typeof data.head_commit === "object" && data.head_commit !== null
+        ? (data.head_commit as Record<string, unknown>)
         : undefined;
+    const branchUpdateCount =
+      typeof data.commits?.length === "number" ? data.commits.length : 0;
+    const changedFiles = collectChangedFiles(latestCommit);
+    const requiredMatches = REQUIRED_FILES.map((file) => ({
+      file,
+      matches: matchByBasename(changedFiles, file),
+    }));
+    const taskYamlMatches = changedFiles.filter((file) =>
+      TASK_YAML_REGEX.test(file),
+    );
 
     // Log branch details
     console.log(`\n${"=".repeat(70)}`);
-    console.log(`✅ BRANCH EVENT RECEIVED`);
+    console.log(`✅ BRANCH PUSH RECEIVED`);
     console.log(`${"=".repeat(70)}`);
     console.log(`📅 Timestamp: ${new Date().toISOString()}`);
     console.log(`🔑 Delivery ID: ${delivery}`);
     console.log(`📍 Repository: ${data.repository?.full_name}`);
     console.log(`🔗 Repository URL: ${data.repository?.html_url}`);
-    console.log(`\n📋 BRANCH DETAILS:`);
-    console.log(`   🧩 Feature Branch: ${featureBranch || "unknown"}`);
-    console.log(`   🧩 Feature Branch Role: ${featureBranchRole}`);
-    console.log(`   🛠️ Task Branch: ${taskBranch || "unknown"}`);
-    console.log(`   🛠️ Task Branch Role: ${taskBranchRole}`);
-    console.log(`   ⚡ Event: ${event}`);
-    console.log(`   📌 State: ${branchState}`);
-    console.log(`   📈 Commits: ${branchUpdateCount ?? 0}`);
+    console.log(`\n🌿 BRANCH INFO:`);
+    console.log(`   🌱 Branch: ${branchName ?? "unknown"}`);
+    console.log(`   🏷️ Role: ${branchRole}`);
+    console.log(`   📈 Commits in push: ${branchUpdateCount}`);
     console.log(`   👤 Sender: ${data.sender?.login || "unknown"}`);
 
-    if (event === "create") {
-      console.log(`\n🎉 BRANCH CREATED`);
-      console.log(`   🌱 New branch: ${branchName}`);
-    } else if (event === "push") {
-      console.log(`\n🔄 BRANCH UPDATED`);
-      console.log(`   🌱 Branch: ${branchName}`);
-      console.log(
-        `   🧾 Latest commit: ${data.head_commit?.message || "unknown"}`,
-      );
-      console.log(
-        `   👤 Committer: ${data.head_commit?.author?.name || "unknown"}`,
-      );
+    console.log(`\n🧾 LATEST COMMIT:`);
+    console.log(`   🔑 ID: ${latestCommit?.id || "unknown"}`);
+    console.log(`   💬 Message: ${latestCommit?.message || "unknown"}`);
+    console.log(`   👤 Author: ${latestCommit?.author?.name || "unknown"}`);
+
+    console.log(`\n📁 FILE CHECK (latest commit):`);
+    if (changedFiles.length === 0) {
+      console.log("   ⚠️ No file changes found in head_commit");
     }
+
+    for (const item of requiredMatches) {
+      const status = item.matches.length > 0 ? "✅" : "❌";
+      const detail =
+        item.matches.length > 0 ? ` -> ${item.matches.join(", ")}` : "";
+      console.log(`   ${status} ${item.file}${detail}`);
+    }
+
+    const taskYamlStatus = taskYamlMatches.length > 0 ? "✅" : "❌";
+    const taskYamlDetail =
+      taskYamlMatches.length > 0 ? ` -> ${taskYamlMatches.join(", ")}` : "";
+    console.log(`   ${taskYamlStatus} T*.yaml${taskYamlDetail}`);
 
     console.log(`${"=".repeat(70)}\n`);
 
     return c.json({
       success: true,
       event,
-      state: branchState,
       branch: branchName,
       branch_role: branchRole,
-      feature_branch: featureBranch,
-      task_branch: taskBranch,
       delivery,
+      latest_commit: {
+        id: latestCommit?.id ?? null,
+        message: latestCommit?.message ?? null,
+        author: latestCommit?.author ?? null,
+        url: latestCommit?.url ?? null,
+      },
+      files_checked: {
+        required: requiredMatches.map((item) => ({
+          name: item.file,
+          matches: item.matches,
+        })),
+        task_yaml: taskYamlMatches,
+      },
       processed_at: new Date().toISOString(),
     });
   } catch (error) {
