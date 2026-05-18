@@ -50,8 +50,28 @@ app.post("/webhook/github", async (c) => {
     const event = c.req.header("x-github-event");
     const delivery = c.req.header("x-github-delivery");
 
+    console.log(
+      `[webhook] incoming event=${event ?? "unknown"} delivery=${delivery ?? "unknown"}`,
+    );
+
+    if (!event) {
+      return c.json({ error: "Missing event header" }, 400);
+    }
+
     if (!signature) {
+      console.warn(
+        `[webhook] missing signature delivery=${delivery ?? "unknown"}`,
+      );
       return c.json({ error: "Missing signature" }, 401);
+    }
+
+    // Verify signature
+    const isValid = await verifyGitHubSignature(payload, signature);
+    if (!isValid) {
+      console.warn(
+        `[webhook] invalid signature event=${event} delivery=${delivery ?? "unknown"}`,
+      );
+      return c.json({ error: "Unauthorized" }, 401);
     }
 
     // Only accept pull_request events
@@ -63,13 +83,6 @@ app.post("/webhook/github", async (c) => {
         },
         202,
       );
-    }
-
-    // Verify signature
-    const isValid = await verifyGitHubSignature(payload, signature);
-    if (!isValid) {
-      console.warn("❌ Invalid webhook signature");
-      return c.json({ error: "Unauthorized" }, 401);
     }
 
     // Parse the JSON payload
@@ -97,9 +110,9 @@ app.post("/webhook/github", async (c) => {
     console.log(`   ➖ Deletions: ${pr?.deletions}`);
     console.log(`   📁 Changed Files: ${pr?.changed_files}`);
     console.log(`   💬 Comments: ${pr?.comments}`);
-    console.log(`   👍 Approvals: ${pr?.approved_by?.login || 0}`);
+    console.log(`   👍 Approvals: n/a (not included in pull_request payload)`);
 
-    if (pr?.description) {
+    if (typeof pr?.body === "string" && pr.body.length > 0) {
       console.log(`   📄 Description: ${pr.body?.substring(0, 100)}...`);
     }
 
@@ -135,11 +148,6 @@ app.post("/webhook/github", async (c) => {
     console.error("❌ Webhook error:", error);
     return c.json({ error: "Internal server error" }, 500);
   }
-});
-
-// Health check
-app.get("/health", (c) => {
-  return c.json({ status: "ok" });
 });
 
 // 404 handler
