@@ -5,6 +5,8 @@ const app = new Hono();
 // GitHub webhook secret (set via env variable)
 const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "your-secret-here";
 const PORT = process.env.PORT || 3000;
+const LOG_FULL_PAYLOAD = process.env.LOG_FULL_PAYLOAD === "true";
+const PAYLOAD_PREVIEW_LENGTH = 800;
 
 /**
  * Verify GitHub webhook signature
@@ -51,7 +53,7 @@ app.post("/webhook/github", async (c) => {
     const delivery = c.req.header("x-github-delivery");
 
     console.log(
-      `[webhook] incoming event=${event ?? "unknown"} delivery=${delivery ?? "unknown"}`,
+      `[webhook] incoming event=${event ?? "unknown"} delivery=${delivery ?? "unknown"} bytes=${payload.length}`,
     );
 
     if (!event) {
@@ -74,8 +76,39 @@ app.post("/webhook/github", async (c) => {
       return c.json({ error: "Unauthorized" }, 401);
     }
 
+    if (LOG_FULL_PAYLOAD) {
+      console.log(`[webhook] payload(full): ${payload}`);
+    } else {
+      const preview =
+        payload.length > PAYLOAD_PREVIEW_LENGTH
+          ? `${payload.slice(0, PAYLOAD_PREVIEW_LENGTH)}...`
+          : payload;
+      console.log(`[webhook] payload(preview): ${preview}`);
+    }
+
+    let data: Record<string, any>;
+    try {
+      data = JSON.parse(payload) as Record<string, any>;
+    } catch {
+      console.warn(
+        `[webhook] invalid JSON body event=${event} delivery=${delivery ?? "unknown"}`,
+      );
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const action = typeof data.action === "string" ? data.action : "unknown";
+    const repoName =
+      typeof data.repository?.full_name === "string"
+        ? data.repository.full_name
+        : "unknown";
+
+    console.log(`[webhook] parsed repo=${repoName} action=${action}`);
+
     // Only accept pull_request events
     if (event !== "pull_request") {
+      console.log(
+        `[webhook] ignored event=${event} action=${action} delivery=${delivery ?? "unknown"}`,
+      );
       return c.json(
         {
           success: false,
@@ -85,8 +118,6 @@ app.post("/webhook/github", async (c) => {
       );
     }
 
-    // Parse the JSON payload
-    const data = JSON.parse(payload);
     const pr = data.pull_request;
 
     // Log pull request details
