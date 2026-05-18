@@ -26,6 +26,14 @@ function getBranchRole(branchName?: string): "feature" | "task" | "other" {
   return "other";
 }
 
+function getBranchNameFromRef(ref?: string): string | undefined {
+  if (!ref) {
+    return undefined;
+  }
+
+  return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+}
+
 /**
  * Verify GitHub webhook signature
  * GitHub sends: X-Hub-Signature-256 header with format: sha256=<signature>
@@ -62,7 +70,7 @@ app.get("/health", (c) => {
   return c.json({ status: "ok" });
 });
 
-// GitHub webhook endpoint - listens only to pull_request events
+// GitHub webhook endpoint - listens to branch created/updated events
 app.post("/webhook/github", async (c) => {
   try {
     const payload = await c.req.text();
@@ -122,70 +130,84 @@ app.post("/webhook/github", async (c) => {
 
     console.log(`[webhook] parsed repo=${repoName} action=${action}`);
 
-    // Only accept pull_request events
-    if (event !== "pull_request") {
+    const branchName =
+      event === "push"
+        ? getBranchNameFromRef(data.ref)
+        : event === "create"
+          ? typeof data.ref === "string"
+            ? data.ref
+            : undefined
+          : undefined;
+
+    const branchRole = getBranchRole(branchName);
+
+    if (branchRole === "other") {
       console.log(
-        `[webhook] ignored event=${event} action=${action} delivery=${delivery ?? "unknown"}`,
+        `[webhook] ignored branch=${branchName ?? "unknown"} event=${event} delivery=${delivery ?? "unknown"}`,
       );
       return c.json(
         {
           success: false,
-          message: `Event type "${event}" ignored. Only "pull_request" events are processed.`,
+          message: `Branch "${branchName ?? "unknown"}" ignored. Only feature/task branches are processed.`,
         },
         202,
       );
     }
 
-    const pr = data.pull_request;
-    const featureBranch = pr?.base?.ref;
-    const taskBranch = pr?.head?.ref;
+    if (event !== "create" && event !== "push") {
+      console.log(
+        `[webhook] ignored event=${event} branch=${branchName ?? "unknown"} delivery=${delivery ?? "unknown"}`,
+      );
+      return c.json(
+        {
+          success: false,
+          message: `Event type "${event}" ignored. Only "create" and "push" events are processed.`,
+        },
+        202,
+      );
+    }
+
+    const featureBranch =
+      branchRole === "feature" ? branchName : FEATURE_BRANCH_NAME;
+    const taskBranch = branchRole === "task" ? branchName : branchName;
     const featureBranchRole = getBranchRole(featureBranch);
     const taskBranchRole = getBranchRole(taskBranch);
+    const branchState = event === "create" ? "created" : "updated";
+    const branchUpdateCount =
+      event === "push" && typeof data.commits?.length === "number"
+        ? data.commits.length
+        : undefined;
 
-    // Log pull request details
+    // Log branch details
     console.log(`\n${"=".repeat(70)}`);
-    console.log(`✅ PULL REQUEST EVENT RECEIVED`);
+    console.log(`✅ BRANCH EVENT RECEIVED`);
     console.log(`${"=".repeat(70)}`);
     console.log(`📅 Timestamp: ${new Date().toISOString()}`);
     console.log(`🔑 Delivery ID: ${delivery}`);
     console.log(`📍 Repository: ${data.repository?.full_name}`);
     console.log(`🔗 Repository URL: ${data.repository?.html_url}`);
-    console.log(`\n📋 PULL REQUEST DETAILS:`);
-    console.log(`   🔢 PR Number: #${pr?.number}`);
-    console.log(`   📝 Title: ${pr?.title}`);
-    console.log(`   ⚡ Action: ${data.action}`);
-    console.log(`   📊 State: ${pr?.state}`);
-    console.log(`   👤 Author: ${pr?.user?.login}`);
+    console.log(`\n📋 BRANCH DETAILS:`);
     console.log(`   🧩 Feature Branch: ${featureBranch || "unknown"}`);
     console.log(`   🧩 Feature Branch Role: ${featureBranchRole}`);
     console.log(`   🛠️ Task Branch: ${taskBranch || "unknown"}`);
     console.log(`   🛠️ Task Branch Role: ${taskBranchRole}`);
-    console.log(`   📈 Commits: ${pr?.commits}`);
-    console.log(`   ➕ Additions: ${pr?.additions}`);
-    console.log(`   ➖ Deletions: ${pr?.deletions}`);
-    console.log(`   📁 Changed Files: ${pr?.changed_files}`);
-    console.log(`   💬 Comments: ${pr?.comments}`);
-    console.log(`   👍 Approvals: n/a (not included in pull_request payload)`);
+    console.log(`   ⚡ Event: ${event}`);
+    console.log(`   📌 State: ${branchState}`);
+    console.log(`   📈 Commits: ${branchUpdateCount ?? 0}`);
+    console.log(`   👤 Sender: ${data.sender?.login || "unknown"}`);
 
-    if (typeof pr?.body === "string" && pr.body.length > 0) {
-      console.log(`   📄 Description: ${pr.body?.substring(0, 100)}...`);
-    }
-
-    if (data.action === "opened") {
-      console.log(`\n🎉 NEW PR OPENED`);
-    } else if (data.action === "closed") {
-      console.log(`\n🔒 PR CLOSED`);
-      if (pr?.merged) {
-        console.log(`   ✅ MERGED by: ${pr.merged_by?.login}`);
-      }
-    } else if (data.action === "reopened") {
-      console.log(`\n🔄 PR REOPENED`);
-    } else if (data.action === "synchronize") {
-      console.log(`\n🔄 NEW COMMITS PUSHED`);
-    } else if (data.action === "ready_for_review") {
-      console.log(`\n✅ READY FOR REVIEW`);
-    } else if (data.action === "converted_to_draft") {
-      console.log(`\n📝 CONVERTED TO DRAFT`);
+    if (event === "create") {
+      console.log(`\n🎉 BRANCH CREATED`);
+      console.log(`   🌱 New branch: ${branchName}`);
+    } else if (event === "push") {
+      console.log(`\n🔄 BRANCH UPDATED`);
+      console.log(`   🌱 Branch: ${branchName}`);
+      console.log(
+        `   🧾 Latest commit: ${data.head_commit?.message || "unknown"}`,
+      );
+      console.log(
+        `   👤 Committer: ${data.head_commit?.author?.name || "unknown"}`,
+      );
     }
 
     console.log(`${"=".repeat(70)}\n`);
@@ -193,11 +215,11 @@ app.post("/webhook/github", async (c) => {
     return c.json({
       success: true,
       event,
-      action: data.action,
+      state: branchState,
+      branch: branchName,
+      branch_role: branchRole,
       feature_branch: featureBranch,
       task_branch: taskBranch,
-      pr_number: pr?.number,
-      pr_title: pr?.title,
       delivery,
       processed_at: new Date().toISOString(),
     });
