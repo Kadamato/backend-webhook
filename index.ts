@@ -7,6 +7,24 @@ const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "your-secret-here";
 const PORT = process.env.PORT || 3000;
 const LOG_FULL_PAYLOAD = process.env.LOG_FULL_PAYLOAD === "true";
 const PAYLOAD_PREVIEW_LENGTH = 800;
+const FEATURE_BRANCH_NAME = "feature/workspace-data-backend";
+const TASK_BRANCH_PREFIX = "feature/workspace-data-backend-T";
+
+function getBranchRole(branchName?: string): "feature" | "task" | "other" {
+  if (!branchName) {
+    return "other";
+  }
+
+  if (branchName === FEATURE_BRANCH_NAME) {
+    return "feature";
+  }
+
+  if (branchName.startsWith(TASK_BRANCH_PREFIX)) {
+    return "task";
+  }
+
+  return "other";
+}
 
 /**
  * Verify GitHub webhook signature
@@ -119,6 +137,10 @@ app.post("/webhook/github", async (c) => {
     }
 
     const pr = data.pull_request;
+    const featureBranch = pr?.base?.ref;
+    const taskBranch = pr?.head?.ref;
+    const featureBranchRole = getBranchRole(featureBranch);
+    const taskBranchRole = getBranchRole(taskBranch);
 
     // Log pull request details
     console.log(`\n${"=".repeat(70)}`);
@@ -134,8 +156,10 @@ app.post("/webhook/github", async (c) => {
     console.log(`   ⚡ Action: ${data.action}`);
     console.log(`   📊 State: ${pr?.state}`);
     console.log(`   👤 Author: ${pr?.user?.login}`);
-    console.log(`   🔀 Head Branch: ${pr?.head?.ref}`);
-    console.log(`   🔀 Base Branch: ${pr?.base?.ref}`);
+    console.log(`   🧩 Feature Branch: ${featureBranch || "unknown"}`);
+    console.log(`   🧩 Feature Branch Role: ${featureBranchRole}`);
+    console.log(`   🛠️ Task Branch: ${taskBranch || "unknown"}`);
+    console.log(`   🛠️ Task Branch Role: ${taskBranchRole}`);
     console.log(`   📈 Commits: ${pr?.commits}`);
     console.log(`   ➕ Additions: ${pr?.additions}`);
     console.log(`   ➖ Deletions: ${pr?.deletions}`);
@@ -170,6 +194,8 @@ app.post("/webhook/github", async (c) => {
       success: true,
       event,
       action: data.action,
+      feature_branch: featureBranch,
+      task_branch: taskBranch,
       pr_number: pr?.number,
       pr_title: pr?.title,
       delivery,
